@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <pthread.h>
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -59,12 +60,27 @@
 #define MAX_RX_NUM_PKTS 2048
 #define ALIGN_SIZE(size, align) size = ((size + (align)-1) / (align)) * (align);
 
+#ifndef ACCESS_ONCE_64b
+#define ACCESS_ONCE_64b(x) (*(volatile uint64_t *)&(x))
+#endif
+#ifndef WRITE_ONCE_64b
+#define WRITE_ONCE_64b(x, v) (ACCESS_ONCE_64b(x) = (v))
+#endif
+
+
 /* Application configuration structure */
 struct sample_simple_recv_cfg {
 	char gpu_pcie_addr[MAX_PCI_ADDRESS_LEN]; /* GPU PCIe address */
 	char nic_pcie_addr[MAX_PCI_ADDRESS_LEN]; /* Network card PCIe address */
 	int cuda_id;				 /* CUDA ID of the device */
 	uint32_t exec_scope;			 /* Define the shared qp exec scope */
+	bool cpu_proxy;				 /* Enable CPU proxy mode for UAR doorbell ring */
+};
+
+/* CPU Proxy thread arguments */
+struct cpu_proxy_args {
+	struct doca_eth_rxq *rxq; /* DOCA Eth Rxq handler to progress */
+	uint64_t *exit_flag;	  /* CPU thread exit flag */
 };
 
 /* receive queues objects */

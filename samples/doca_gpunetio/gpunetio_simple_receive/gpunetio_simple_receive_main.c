@@ -29,6 +29,26 @@
 DOCA_LOG_REGISTER(GPUNETIO_SIMPLE_RECEIVE::MAIN);
 
 /*
+ * ARGP Callback - Enable/Disable CPU proxy mode
+ *
+ * @param [in]: Input parameter
+ * @config [in/out]: Program configuration context
+ * @return: DOCA_SUCCESS on success and DOCA_ERROR otherwise
+ */
+doca_error_t proxy_callback(void *param, void *config)
+{
+	struct sample_simple_recv_cfg *sample_cfg = (struct sample_simple_recv_cfg *)config;
+	const int cpu_proxy = *(uint32_t *)param;
+
+	if (cpu_proxy == 0)
+		sample_cfg->cpu_proxy = false;
+	else
+		sample_cfg->cpu_proxy = true;
+
+	return DOCA_SUCCESS;
+}
+
+/*
  * ARGP Callback - Set shared QP execution mode (THREAD, WARP or BLOCK)
  *
  * @param [in]: Input parameter
@@ -107,7 +127,7 @@ static doca_error_t nic_pci_address_callback(void *param, void *config)
 static doca_error_t register_sample_params(void)
 {
 	doca_error_t result;
-	struct doca_argp_param *exec_param, *gpu_param, *nic_param;
+	struct doca_argp_param *exec_param, *gpu_param, *nic_param, *proxy_param;
 
 	result = doca_argp_param_create(&exec_param);
 	if (result != DOCA_SUCCESS) {
@@ -164,6 +184,23 @@ static doca_error_t register_sample_params(void)
 		return result;
 	}
 
+	result = doca_argp_param_create(&proxy_param);
+	if (result != DOCA_SUCCESS) {
+		DOCA_LOG_ERR("Failed to create ARGP param: %s", doca_error_get_descr(result));
+		return result;
+	}
+	doca_argp_param_set_short_name(proxy_param, "p");
+	doca_argp_param_set_long_name(proxy_param, "proxy");
+	doca_argp_param_set_arguments(proxy_param, "<Enable/disable CPU proxy mode>");
+	doca_argp_param_set_description(proxy_param, "CPU proxy mode (0: Off 1: On). Use when GDRCopy is unavailable.");
+	doca_argp_param_set_callback(proxy_param, proxy_callback);
+	doca_argp_param_set_type(proxy_param, DOCA_ARGP_TYPE_INT);
+	result = doca_argp_register_param(proxy_param);
+	if (result != DOCA_SUCCESS) {
+		DOCA_LOG_ERR("Failed to register program param: %s", doca_error_get_descr(result));
+		return result;
+	}
+
 	return DOCA_SUCCESS;
 }
 
@@ -199,6 +236,7 @@ int main(int argc, char **argv)
 
 	/* Default mode if not set from command line */
 	sample_cfg.exec_scope = DOCA_GPUNETIO_ETH_EXEC_SCOPE_BLOCK;
+	sample_cfg.cpu_proxy = false;
 
 	result = doca_argp_init(NULL, &sample_cfg);
 	if (result != DOCA_SUCCESS) {

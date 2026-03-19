@@ -454,14 +454,17 @@ static doca_error_t destroy_rxq(struct rxq_queue *rxq)
 }
 
 /*
- * Create DOCA Ethernet Tx queue for GPU
+ * Create DOCA Ethernet Rx queue for GPU
  *
- * @rxq [in]: DOCA Eth Tx queue handler
+ * @rxq [in]: DOCA Eth Rx queue handler
  * @gpu_dev [in]: DOCA GPUNetIO device
+ * @cuda_id [in]: CUDA device ID
  * @ddev [in]: DOCA device
+ * @cpu_proxy [in]: Enable CPU proxy mode (UAR on CPU, no GDRCopy required)
  * @return: DOCA_SUCCESS on success and DOCA_ERROR otherwise
  */
-static doca_error_t create_rxq(struct rxq_queue *rxq, struct doca_gpu *gpu_dev, int cuda_id, struct doca_dev *ddev)
+static doca_error_t create_rxq(struct rxq_queue *rxq, struct doca_gpu *gpu_dev, int cuda_id, struct doca_dev *ddev,
+			       bool cpu_proxy)
 {
 	doca_error_t result;
 	uint32_t cyclic_buffer_size = 0;
@@ -587,6 +590,14 @@ static doca_error_t create_rxq(struct rxq_queue *rxq, struct doca_gpu *gpu_dev, 
 		}
 	}
 
+	if (cpu_proxy) {
+		result = doca_eth_rxq_gpu_set_uar_on_cpu(rxq->eth_rxq_cpu);
+		if (result != DOCA_SUCCESS) {
+			DOCA_LOG_ERR("Failed doca_eth_rxq_gpu_set_uar_on_cpu: %s", doca_error_get_descr(result));
+			goto exit_error;
+		}
+	}
+
 	rxq->eth_rxq_ctx = doca_eth_rxq_as_doca_ctx(rxq->eth_rxq_cpu);
 	if (rxq->eth_rxq_ctx == NULL) {
 		DOCA_LOG_ERR("Failed doca_eth_rxq_as_doca_ctx: %s", doca_error_get_descr(result));
@@ -633,6 +644,24 @@ exit_error:
 }
 
 /*
+ * CPU proxy thread: called in a loop to progress the Rxq doorbell from CPU.
+ * Required when UAR is placed on CPU (no GDRCopy) via doca_eth_rxq_gpu_set_uar_on_cpu().
+ *
+ * @args_ [in]: Thread args (cpu_proxy_args *)
+ */
+static void *progress_cpu_proxy(void *args_)
+{
+	struct cpu_proxy_args *args = (struct cpu_proxy_args *)args_;
+
+	printf("Thread CPU proxy progress is running... %ld\n", ACCESS_ONCE_64b(*args->exit_flag));
+
+	while (ACCESS_ONCE_64b(*args->exit_flag) == 0)
+		doca_eth_rxq_gpu_cpu_proxy_progress(args->rxq);
+
+	return NULL;
+}
+
+/*
  * Launch GPUNetIO simple receive sample
  *
  * @sample_cfg [in]: Sample config parameters
@@ -650,6 +679,8 @@ doca_error_t gpunetio_simple_receive(struct sample_simple_recv_cfg *sample_cfg)
 	uint32_t *gpu_exit_condition;
 	uint64_t *cpu_tot_pkts;
 	uint64_t *gpu_tot_pkts;
+	struct cpu_proxy_args proxy_args;
+	pthread_t proxy_thread_id;
 
 	result = init_doca_device(sample_cfg->nic_pcie_addr, &ddev);
 	if (result != DOCA_SUCCESS) {
@@ -680,7 +711,7 @@ doca_error_t gpunetio_simple_receive(struct sample_simple_recv_cfg *sample_cfg)
 		goto exit;
 	}
 
-	result = create_rxq(&rxq, gpu_dev, sample_cfg->cuda_id, ddev);
+	result = create_rxq(&rxq, gpu_dev, sample_cfg->cuda_id, ddev, sample_cfg->cpu_proxy);
 	if (result != DOCA_SUCCESS) {
 		DOCA_LOG_ERR("Function create_rxq returned %s", doca_error_get_descr(result));
 		goto exit;
@@ -716,6 +747,18 @@ doca_error_t gpunetio_simple_receive(struct sample_simple_recv_cfg *sample_cfg)
 	}
 	cpu_tot_pkts[0] = 0;
 
+	if (sample_cfg->cpu_proxy) {
+		proxy_args.rxq = rxq.eth_rxq_cpu;
+		proxy_args.exit_flag = (uint64_t *)calloc(1, sizeof(uint64_t));
+		*(proxy_args.exit_flag) = 0;
+
+		int proxy_ret = pthread_create(&proxy_thread_id, NULL, progress_cpu_proxy, (void *)&proxy_args);
+		if (proxy_ret != 0) {
+			perror("Failed to create CPU proxy thread");
+			goto exit;
+		}
+	}
+
 	DOCA_LOG_INFO("Launching CUDA kernel to receive packets");
 
 	kernel_receive_packets(stream, &rxq, sample_cfg->exec_scope, gpu_exit_condition, gpu_tot_pkts);
@@ -727,6 +770,12 @@ doca_error_t gpunetio_simple_receive(struct sample_simple_recv_cfg *sample_cfg)
 	DOCA_GPUNETIO_VOLATILE(*cpu_exit_condition) = 1;
 
 	cudaStreamSynchronize(stream);
+
+	if (sample_cfg->cpu_proxy) {
+		WRITE_ONCE_64b(*proxy_args.exit_flag, 1);
+		pthread_join(proxy_thread_id, NULL);
+		free(proxy_args.exit_flag);
+	}
 
 	printf("Exiting from simple receive sample. Total number of received packets: %ld\n", cpu_tot_pkts[0]);
 exit:

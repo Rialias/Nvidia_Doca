@@ -61,7 +61,6 @@ nvcc_flags = []
 if cuda_version.version_compare('< 13-0')
 	nvcc_flags += ['-gencode', 'arch=compute_70,code=sm_70']
 endif
-nvcc_flags += ['-gencode', 'arch=compute_75,code=sm_75']
 nvcc_flags += ['-gencode', 'arch=compute_80,code=sm_80']
 nvcc_flags += ['-gencode', 'arch=compute_90,code=sm_90']
 if cuda_version.version_compare('>= 12-8')
@@ -80,7 +79,6 @@ nvcc_flags_link = []
 if cuda_version.version_compare('< 13-0')
 	nvcc_flags_link += ['-gencode=arch=compute_70,code=sm_70']
 endif
-nvcc_flags_link += ['-gencode=arch=compute_75,code=sm_75']
 nvcc_flags_link += ['-gencode=arch=compute_80,code=sm_80']
 nvcc_flags_link += ['-gencode=arch=compute_90,code=sm_90']
 if cuda_version.version_compare('>= 12-8')
