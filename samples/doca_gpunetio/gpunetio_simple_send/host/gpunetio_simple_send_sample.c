@@ -387,24 +387,51 @@ static doca_error_t create_txq(struct txq_queue *txq,
 	}
 
 	struct ether_hdr *eth;
+	struct ipv4_hdr *ip;
+	struct udp_hdr *udp;
+	uint16_t ip_total_len;
+	uint16_t udp_dgram_len;
 
 	for (uint32_t idx = 0; idx < txq->cuda_threads; idx++) {
-		eth = (struct ether_hdr *)(cpu_pkt_addr + (idx * pkt_size));
-		eth->d_addr_bytes[0] = 0x10;
-		eth->d_addr_bytes[1] = 0x11;
-		eth->d_addr_bytes[2] = 0x12;
-		eth->d_addr_bytes[3] = 0x13;
-		eth->d_addr_bytes[4] = 0x14;
-		eth->d_addr_bytes[5] = 0x15;
+		uint8_t *pkt = cpu_pkt_addr + (idx * pkt_size);
 
+		/* Ethernet header: src=20:21:22:23:24:25 dst=a0:88:c2:20:fd:9a (NIC port 0) */
+		eth = (struct ether_hdr *)pkt;
+		eth->d_addr_bytes[0] = 0xa0;
+		eth->d_addr_bytes[1] = 0x88;
+		eth->d_addr_bytes[2] = 0xc2;
+		eth->d_addr_bytes[3] = 0x20;
+		eth->d_addr_bytes[4] = 0xfd;
+		eth->d_addr_bytes[5] = 0x9a;
 		eth->s_addr_bytes[0] = 0x20;
 		eth->s_addr_bytes[1] = 0x21;
 		eth->s_addr_bytes[2] = 0x22;
 		eth->s_addr_bytes[3] = 0x23;
 		eth->s_addr_bytes[4] = 0x24;
 		eth->s_addr_bytes[5] = 0x25;
-
 		eth->ether_type = CPU_TO_BE16(0x0800);
+
+		/* IPv4 header */
+		ip = (struct ipv4_hdr *)(pkt + sizeof(struct ether_hdr));
+		ip_total_len = (uint16_t)(pkt_size - sizeof(struct ether_hdr));
+		ip->version_ihl    = IPV4_IHL_NO_OPTS;
+		ip->tos            = 0;
+		ip->total_length   = htobe16(ip_total_len);
+		ip->packet_id      = 0;
+		ip->fragment_offset = 0;
+		ip->time_to_live   = 64;
+		ip->next_proto_id  = IPPROTO_UDP_VAL;
+		ip->hdr_checksum   = 0; /* NIC will handle or left as 0 */
+		ip->src_addr       = htobe32(SRC_IP);
+		ip->dst_addr       = htobe32(DST_IP);
+
+		/* UDP header */
+		udp = (struct udp_hdr *)(pkt + sizeof(struct ether_hdr) + sizeof(struct ipv4_hdr));
+		udp_dgram_len = (uint16_t)(pkt_size - sizeof(struct ether_hdr) - sizeof(struct ipv4_hdr));
+		udp->src_port    = htobe16(UDP_DST_PORT);
+		udp->dst_port    = htobe16(UDP_DST_PORT);
+		udp->dgram_len   = htobe16(udp_dgram_len);
+		udp->dgram_cksum = 0;
 	}
 
 	res_cuda = cudaMemcpy(txq->pkt_buff_addr, cpu_pkt_addr, buffer_size, cudaMemcpyDefault);

@@ -67,6 +67,32 @@ struct ether_hdr {
 	uint16_t ether_type;		      /* Frame type */
 } __attribute__((__packed__));
 
+struct ipv4_hdr {
+	uint8_t  version_ihl;    /* Version (4) + IHL (5 = 20B) */
+	uint8_t  tos;
+	uint16_t total_length;   /* IP total length (network byte order) */
+	uint16_t packet_id;
+	uint16_t fragment_offset;
+	uint8_t  time_to_live;
+	uint8_t  next_proto_id;  /* 17 = UDP */
+	uint16_t hdr_checksum;
+	uint32_t src_addr;
+	uint32_t dst_addr;
+} __attribute__((__packed__));
+
+struct udp_hdr {
+	uint16_t src_port;
+	uint16_t dst_port;
+	uint16_t dgram_len;      /* UDP length including header (network byte order) */
+	uint16_t dgram_cksum;
+} __attribute__((__packed__));
+
+#define IPPROTO_UDP_VAL   17
+#define IPV4_IHL_NO_OPTS  0x45  /* version=4, IHL=5 (20B, no options) */
+#define UDP_DST_PORT      2090  /* destination port matching receive filter */
+#define SRC_IP            0xC0A81E01  /* 192.168.30.1 */
+#define DST_IP            0xC0A81E02  /* 192.168.30.2 */
+
 /* Application configuration structure */
 struct sample_simple_send_cfg {
 	char gpu_pcie_addr[MAX_PCI_ADDRESS_LEN];       /* GPU PCIe address */
