@@ -581,8 +581,12 @@ static doca_error_t create_rxq(struct rxq_queue *rxq, struct doca_gpu *gpu_dev, 
 	}
 
 	cudaGetDeviceProperties(&prop, cuda_id);
-	// If pre-Hopper GPU with __CUDA_ARCH__ < 900
-	if (prop.major < 9) {
+	// If pre-Hopper GPU with __CUDA_ARCH__ < 900 AND NOT in cpu_proxy mode:
+	// enable the MCST dump QP for cache coherency after DMA.
+	// In cpu_proxy mode the MCST QP's UAR is on GPU (MMIO), which the GPU cannot ring
+	// on NODE PCIe topology — doing so stalls the entire CUDA block in the rxq_recv
+	// inner loop with no timeout, causing the kernel to hang when packets are received.
+	if (prop.major < 9 && !cpu_proxy) {
 		result = doca_eth_rxq_gpu_enable_mcst_qp(rxq->eth_rxq_cpu);
 		if (result != DOCA_SUCCESS) {
 			DOCA_LOG_ERR("Failed to set GPU dump qp  %s", doca_error_get_descr(result));
@@ -761,21 +765,51 @@ doca_error_t gpunetio_simple_receive(struct sample_simple_recv_cfg *sample_cfg)
 
 	DOCA_LOG_INFO("Launching CUDA kernel to receive packets");
 
-	kernel_receive_packets(stream, &rxq, sample_cfg->exec_scope, gpu_exit_condition, gpu_tot_pkts);
+	kernel_receive_packets(stream, &rxq, sample_cfg->exec_scope, gpu_exit_condition, gpu_tot_pkts, sample_cfg->cpu_proxy);
 
 	DOCA_LOG_INFO("Waiting for termination");
 	/* This loop keeps busy main thread until force_quit is set to 1 (e.g. typing ctrl+c) */
 	while (DOCA_GPUNETIO_VOLATILE(force_quit) == false)
 		;
-	DOCA_GPUNETIO_VOLATILE(*cpu_exit_condition) = 1;
 
-	cudaStreamSynchronize(stream);
+	printf("[SHUTDOWN] Ctrl+C caught, starting shutdown sequence\n");
+	fflush(stdout);
+
+	/* Write exit condition while proxy is still running so rxq_recv can complete.
+	 * Follow with a full memory barrier to flush write-combining buffers — without
+	 * this, the CPU write may sit in a WC buffer and never reach GPU memory. */
+	printf("[SHUTDOWN] Setting GPU exit condition to 1\n");
+	fflush(stdout);
+	DOCA_GPUNETIO_VOLATILE(*cpu_exit_condition) = 1;
+	__sync_synchronize();
+
+	/* Poll for kernel completion with a 2-second timeout instead of blocking
+	 * cudaStreamSynchronize, so we can stop the proxy if the kernel stalls. */
+	printf("[SHUTDOWN] Polling for GPU kernel completion...\n");
+	fflush(stdout);
+	bool kernel_done = false;
+	for (int i = 0; i < 2000; i++) {
+		if (cudaStreamQuery(stream) == cudaSuccess) {
+			kernel_done = true;
+			break;
+		}
+		usleep(1000); /* 1ms */
+	}
+	printf("[SHUTDOWN] GPU kernel %s\n", kernel_done ? "finished cleanly" : "timed out, forcing stop");
+	fflush(stdout);
 
 	if (sample_cfg->cpu_proxy) {
+		printf("[SHUTDOWN] Stopping CPU proxy thread...\n");
+		fflush(stdout);
 		WRITE_ONCE_64b(*proxy_args.exit_flag, 1);
 		pthread_join(proxy_thread_id, NULL);
 		free(proxy_args.exit_flag);
+		printf("[SHUTDOWN] CPU proxy thread stopped\n");
+		fflush(stdout);
 	}
+
+	/* Final synchronize — instant if kernel already done, otherwise cleans up */
+	cudaStreamSynchronize(stream);
 
 	printf("Exiting from simple receive sample. Total number of received packets: %ld\n", cpu_tot_pkts[0]);
 exit:

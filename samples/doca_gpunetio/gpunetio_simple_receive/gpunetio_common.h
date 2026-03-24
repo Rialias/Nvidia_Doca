@@ -120,13 +120,15 @@ extern "C" {
  * @exec_scope [in]: Exec scope for the GPUNetIO Ethernet recv function
  * @gpu_exit_condition [in]: exit from CUDA kernel
  * @tot_pkts [in]: Total number of received packets
+ * @cpu_proxy [in]: Use CPU proxy NIC handler (required when UAR is on CPU)
  * @return: DOCA_SUCCESS on success and DOCA_ERROR otherwise
  */
 doca_error_t kernel_receive_packets(cudaStream_t stream,
 				    struct rxq_queue *rxq,
 				    enum doca_gpu_dev_eth_exec_scope exec_scope,
 				    uint32_t *gpu_exit_condition,
-				    uint64_t *tot_pkts);
+				    uint64_t *tot_pkts,
+				    bool cpu_proxy);
 
 #if __cplusplus
 }

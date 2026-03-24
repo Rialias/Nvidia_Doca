@@ -27,11 +27,12 @@
 #include <doca_log.h>
 #include "gpunetio_common.h"
 
-#define DOCA_GPUNETIO_SIMPLE_RECEIVE_DEBUG 0
+#define DOCA_GPUNETIO_SIMPLE_RECEIVE_DEBUG 1
 
 DOCA_LOG_REGISTER(GPUNETIO_SIMPLE_RECEIVE::KERNEL);
 
-template <enum doca_gpu_dev_eth_exec_scope exec_scope = DOCA_GPUNETIO_ETH_EXEC_SCOPE_BLOCK>
+template <enum doca_gpu_dev_eth_exec_scope exec_scope = DOCA_GPUNETIO_ETH_EXEC_SCOPE_BLOCK,
+	  enum doca_gpu_dev_eth_nic_handler nic_handler = DOCA_GPUNETIO_ETH_NIC_HANDLER_AUTO>
 __global__ void receive_packets(struct doca_gpu_eth_rxq *rxq, uint32_t *exit_cond, uint64_t *tot_pkts)
 {
 	doca_error_t ret;
@@ -46,7 +47,7 @@ __global__ void receive_packets(struct doca_gpu_eth_rxq *rxq, uint32_t *exit_con
 			if (threadIdx.x == 0) {
 				ret = doca_gpu_dev_eth_rxq_recv<exec_scope,
 												DOCA_GPUNETIO_ETH_MCST_AUTO,
-												DOCA_GPUNETIO_ETH_NIC_HANDLER_AUTO,
+										nic_handler,
 												DOCA_GPUNETIO_ETH_RX_ATTR_ALL>(
 								rxq,
 								MAX_RX_NUM_PKTS,
@@ -70,14 +71,14 @@ __global__ void receive_packets(struct doca_gpu_eth_rxq *rxq, uint32_t *exit_con
 		} else {
 			ret = doca_gpu_dev_eth_rxq_recv<exec_scope,
 											DOCA_GPUNETIO_ETH_MCST_AUTO,
-											DOCA_GPUNETIO_ETH_NIC_HANDLER_AUTO,
+										nic_handler,
 											DOCA_GPUNETIO_ETH_RX_ATTR_ALL>(
-							rxq,
-							MAX_RX_NUM_PKTS,
-							MAX_RX_TIMEOUT_NS,
-							&out_first_pkt_idx,
-							&out_pkt_num,
-							out_attr);
+								rxq,
+								MAX_RX_NUM_PKTS,
+								MAX_RX_TIMEOUT_NS,
+								&out_first_pkt_idx,
+								&out_pkt_num,
+								out_attr);
 			/* If any thread returns receive error, the whole execution stops */
 			if (ret != DOCA_SUCCESS) {
 				if (threadIdx.x == 0) {
@@ -128,7 +129,7 @@ __global__ void receive_packets(struct doca_gpu_eth_rxq *rxq, uint32_t *exit_con
 
 extern "C" {
 
-doca_error_t kernel_receive_packets(cudaStream_t stream, struct rxq_queue *rxq, enum doca_gpu_dev_eth_exec_scope exec_scope, uint32_t *gpu_exit_condition, uint64_t *tot_pkts)
+doca_error_t kernel_receive_packets(cudaStream_t stream, struct rxq_queue *rxq, enum doca_gpu_dev_eth_exec_scope exec_scope, uint32_t *gpu_exit_condition, uint64_t *tot_pkts, bool cpu_proxy)
 {
 	cudaError_t result = cudaSuccess;
 
@@ -145,12 +146,22 @@ doca_error_t kernel_receive_packets(cudaStream_t stream, struct rxq_queue *rxq, 
 	}
 
 	/* Assuming CUDA_BLOCK_THREADS == 32 CUDA Threads == 1 WARP for simplicity */
-	if (exec_scope == DOCA_GPUNETIO_ETH_EXEC_SCOPE_THREAD)
-		receive_packets<DOCA_GPUNETIO_ETH_EXEC_SCOPE_THREAD><<<1, CUDA_BLOCK_THREADS, 0, stream>>>(rxq->eth_rxq_gpu, gpu_exit_condition, tot_pkts);
-	if (exec_scope == DOCA_GPUNETIO_ETH_EXEC_SCOPE_WARP)
-		receive_packets<DOCA_GPUNETIO_ETH_EXEC_SCOPE_WARP><<<1, CUDA_BLOCK_THREADS, 0, stream>>>(rxq->eth_rxq_gpu, gpu_exit_condition, tot_pkts);
-	if (exec_scope == DOCA_GPUNETIO_ETH_EXEC_SCOPE_BLOCK)
-		receive_packets<DOCA_GPUNETIO_ETH_EXEC_SCOPE_BLOCK><<<1, CUDA_BLOCK_THREADS, 0, stream>>>(rxq->eth_rxq_gpu, gpu_exit_condition, tot_pkts);
+	if (cpu_proxy) {
+		/* UAR is on CPU: use CPU_PROXY NIC handler so the GPU does not try to ring the doorbell */
+		if (exec_scope == DOCA_GPUNETIO_ETH_EXEC_SCOPE_THREAD)
+			receive_packets<DOCA_GPUNETIO_ETH_EXEC_SCOPE_THREAD, DOCA_GPUNETIO_ETH_NIC_HANDLER_CPU_PROXY><<<1, CUDA_BLOCK_THREADS, 0, stream>>>(rxq->eth_rxq_gpu, gpu_exit_condition, tot_pkts);
+		if (exec_scope == DOCA_GPUNETIO_ETH_EXEC_SCOPE_WARP)
+			receive_packets<DOCA_GPUNETIO_ETH_EXEC_SCOPE_WARP, DOCA_GPUNETIO_ETH_NIC_HANDLER_CPU_PROXY><<<1, CUDA_BLOCK_THREADS, 0, stream>>>(rxq->eth_rxq_gpu, gpu_exit_condition, tot_pkts);
+		if (exec_scope == DOCA_GPUNETIO_ETH_EXEC_SCOPE_BLOCK)
+			receive_packets<DOCA_GPUNETIO_ETH_EXEC_SCOPE_BLOCK, DOCA_GPUNETIO_ETH_NIC_HANDLER_CPU_PROXY><<<1, CUDA_BLOCK_THREADS, 0, stream>>>(rxq->eth_rxq_gpu, gpu_exit_condition, tot_pkts);
+	} else {
+		if (exec_scope == DOCA_GPUNETIO_ETH_EXEC_SCOPE_THREAD)
+			receive_packets<DOCA_GPUNETIO_ETH_EXEC_SCOPE_THREAD><<<1, CUDA_BLOCK_THREADS, 0, stream>>>(rxq->eth_rxq_gpu, gpu_exit_condition, tot_pkts);
+		if (exec_scope == DOCA_GPUNETIO_ETH_EXEC_SCOPE_WARP)
+			receive_packets<DOCA_GPUNETIO_ETH_EXEC_SCOPE_WARP><<<1, CUDA_BLOCK_THREADS, 0, stream>>>(rxq->eth_rxq_gpu, gpu_exit_condition, tot_pkts);
+		if (exec_scope == DOCA_GPUNETIO_ETH_EXEC_SCOPE_BLOCK)
+			receive_packets<DOCA_GPUNETIO_ETH_EXEC_SCOPE_BLOCK><<<1, CUDA_BLOCK_THREADS, 0, stream>>>(rxq->eth_rxq_gpu, gpu_exit_condition, tot_pkts);
+	}
 
 	result = cudaGetLastError();
 	if (cudaSuccess != result) {
